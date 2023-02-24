@@ -1,0 +1,232 @@
+---
+title: "feature engineering & interpretability for xgboost with board game ratings"
+output: github_document
+---
+
+___
+
+### setup
+
+```{r message = F, warning = F}
+library(tidyverse)
+library(tidymodels)
+library(textrecipes)
+library(finetune)
+library(vip)
+library(SHAPforxgboost)
+
+theme_custom = tvthemes::theme_avatar() +
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_line(linewidth = 0.5, colour = "#D6D0C4"),
+        panel.grid.minor = element_line(linewidth = 0.5, colour = "#D6D0C4"))
+
+theme_set(theme_custom)
+```
+
+___
+
+### importing data
+
+```{r}
+link = "https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-01-25/ratings.csv"
+ratings = read_csv(link, col_types = cols())
+link = "https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-01-25/details.csv"
+details = read_csv(link, col_types = cols())
+
+ratings_joined = ratings |>
+  left_join(details, by = "id")
+
+glimpse(ratings_joined)
+```
+
+___
+
+### visualizing rating distribution
+
+```{r}
+ratings_joined |>
+  ggplot(aes(average)) +
+  geom_histogram(bins = 25, fill = "#BDADC2") +
+  labs(x = "average rating", title = "distribution of game ratings")
+```
+
+___
+
+### boxplots of average game ratings by minimum age
+
+```{r}
+ratings_joined |>
+  filter(!is.na(minage)) |>
+  mutate(minage = cut_number(minage, 4)) |>
+  ggplot(aes(minage, average)) +
+  geom_boxplot(aes(fill = minage), alpha = 0.25, show.legend = F) +
+  labs(x = "game minimum age", y = "average rating",
+       title = "average rating by minimum age")
+```
+
+___
+
+### preparing data for modeling
+
+```{r}
+set.seed(123)
+
+game_split = ratings_joined |>
+  select(name, average, matches("min|max"), boardgamecategory) |>
+  na.omit() |>
+  initial_split(strata = average)
+
+game_train = training(game_split)
+game_test = testing(game_split)
+set.seed(234)
+game_folds = vfold_cv(game_train, strata = average)
+game_folds
+```
+
+___
+
+### creating custom tokenization function
+
+```{r warning = F}
+split_category = function(x) {
+  x |>
+    str_split(", ") |>
+    map(str_remove_all, "[:punct:]") |>
+    map(str_squish) |>
+    map(str_to_lower) |>
+    map(str_replace_all, " ", "_")
+}
+
+game_rec = recipe(average ~ ., data = game_train) |>
+  update_role(name, new_role = "id") |>
+  step_tokenize(boardgamecategory, custom_token = split_category) |>
+  step_tokenfilter(boardgamecategory, max_tokens = 30) |>
+  step_tf(boardgamecategory)
+
+game_prep = prep(game_rec)
+bake(game_prep, new_data = NULL) |> str()
+```
+
+___
+
+### building tunable model specification
+
+```{r}
+xgb_spec = boost_tree(trees = tune(), min_n = tune(), learn_rate = 0.01) |>
+  set_engine("xgboost") |>
+  set_mode("regression")
+
+xgb_wf = workflow(game_rec, xgb_spec)
+xgb_wf
+```
+
+___
+
+### tuning model
+
+```{r warning = F}
+doParallel::registerDoParallel()
+set.seed(345)
+
+xgb_game_rs = tune_grid(xgb_wf, game_folds, grid = 10,
+                        control = control_race(verbose_elim = T, pkgs = "stringr"))
+
+xgb_game_rs
+```
+
+___
+
+### getting best model specs
+
+```{r}
+show_best(xgb_game_rs, metric = "rmse")
+```
+
+___
+
+### selecting best model
+
+```{r}
+xgb_last = xgb_wf |>
+  finalize_workflow(select_best(xgb_game_rs, "rmse")) |>
+  last_fit(game_split)
+
+xgb_last
+```
+
+___
+
+### getting variable importance
+
+```{r warning = F}
+xgb_fit = extract_fit_parsnip(xgb_last)
+vip(xgb_fit, geom = "point", num_features = 12)
+```
+
+___
+
+### computing SHAP values
+
+```{r}
+game_shap = shap.prep(xgb_model = extract_fit_engine(xgb_fit),
+                      X_train = bake(game_prep, has_role("predictor"),
+                                     new_data = NULL, composition = "matrix"))
+
+shap.plot.summary(game_shap)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
